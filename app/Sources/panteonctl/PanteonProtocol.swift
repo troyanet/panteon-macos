@@ -87,6 +87,23 @@ enum Panteon {
     // read субкомандой 5, адрес = режим * 0x19 = режим * 25).
     static let modeStride: UInt16 = 0x19
 
+    // Субкоманда чтения блока памяти устройства (парная к записи; из FUN_0047a1a0).
+    static let subReadBlock: UInt8 = 5
+
+    // Команда чтения: запросить len байт по адресу addr.
+    static func buildReadCommand(addr: UInt16, len: UInt8) -> [UInt8] {
+        var buf = [UInt8](repeating: 0, count: commandLength)
+        buf[0] = opcode
+        buf[3] = subReadBlock
+        buf[4] = len
+        buf[5] = UInt8(addr & 0xFF)
+        buf[6] = UInt8((addr >> 8) & 0xFF)
+        let cs = checksum(buf)
+        buf[1] = UInt8(cs & 0xFF)
+        buf[2] = UInt8((cs >> 8) & 0xFF)
+        return buf
+    }
+
     // Команда выбора активного режима: пишет 1 байт режима по адресу 0.
     static func selectModeCommand(mode: UInt8) -> [UInt8] {
         return buildWriteBlock(sub: subWriteBlock, addr: 0, data: [mode])

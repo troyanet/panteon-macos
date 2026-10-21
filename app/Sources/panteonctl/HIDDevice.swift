@@ -103,6 +103,16 @@ func sendOutputReport(_ c: HIDCollection, reportID: UInt8, bytes: [UInt8]) -> IO
     }
 }
 
+// Пытается прочитать input-отчёт синхронно (ещё один канал состояния).
+func getInputReport(_ c: HIDCollection, reportID: UInt8, length: Int) -> (IOReturn, [UInt8]) {
+    var buf = [UInt8](repeating: 0, count: length)
+    var len = length
+    let r = buf.withUnsafeMutableBufferPointer { ptr -> IOReturn in
+        IOHIDDeviceGetReport(c.device, kIOHIDReportTypeInput, CFIndex(reportID), ptr.baseAddress!, &len)
+    }
+    return (r, Array(buf.prefix(len)))
+}
+
 // Пытается прочитать feature-отчёт с устройства (альтернативный канал ответа).
 func getFeatureReport(_ c: HIDCollection, reportID: UInt8, length: Int) -> (IOReturn, [UInt8]) {
     var buf = [UInt8](repeating: 0, count: length)

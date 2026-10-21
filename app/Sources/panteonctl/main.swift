@@ -136,6 +136,129 @@ func runStatic(_ a: [String]) -> Int32 {
     }
 }
 
+// Пытается получить обратную связь: шлёт read-команду на vendor-канал и читает ответ
+// всеми способами (input callback, GetReport input/feature на разных report ID).
+func runRead() -> Int32 {
+    guard let collections = try? findPanteonCollections() else { return 1 }
+    guard let cmd = commandCollection(collections) else {
+        FileHandle.standardError.write(Data("Канал команд не найден\n".utf8)); return 1
+    }
+    guard openDeviceSeized(cmd) == kIOReturnSuccess else {
+        FileHandle.standardError.write(Data("Не открыть устройство (нужен sudo)\n".utf8)); return 1
+    }
+    defer { closeDevice(cmd) }
+
+    // read-команда: прочитать 1 байт по адресу 0 (текущий режим).
+    let readCmd = Panteon.buildReadCommand(addr: 0, len: 1)
+
+    // 1) Отправка + ожидание input-отчёта через колбэк.
+    if let resp = sendCommandAndRead(cmd, packet: Array(readCmd.dropFirst()), reportID: 4, timeout: 0.8) {
+        let hex = resp.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
+        print("✅ Ответ (input callback, \(resp.count) байт): \(hex)")
+        return 0
+    }
+    print("input-колбэк: ответа нет, пробую GetReport…")
+
+    // 2) Синхронное чтение input/feature на разных report ID.
+    _ = sendNumbered(cmd, command: readCmd)
+    usleep(20_000)
+    for rid: UInt8 in [4, 0, 1] {
+        let (ri, di) = getInputReport(cmd, reportID: rid, length: 64)
+        if ri == kIOReturnSuccess && di.contains(where: { $0 != 0 }) {
+            print("input reportID=\(rid): \(di.prefix(24).map { String(format: "%02x", $0) }.joined(separator: " "))")
+        }
+        let (rf, df) = getFeatureReport(cmd, reportID: rid, length: 64)
+        if rf == kIOReturnSuccess && df.contains(where: { $0 != 0 }) {
+            print("feature reportID=\(rid): \(df.prefix(24).map { String(format: "%02x", $0) }.joined(separator: " "))")
+        }
+    }
+    print("Если выше нет строк с байтами — устройство не отдаёт ответ на macOS.")
+    return 0
+}
+
+// Системный перебор каналов/форматов на ярко-зелёном static. Между попытками пауза,
+// чтобы визуально поймать, какой вариант реально меняет подсветку.
+func runSweep() -> Int32 {
+    guard let collections = try? findPanteonCollections() else { return 1 }
+    let green = Panteon.lightBlock(mode: Panteon.modeStatic, brightness: 4, speed: 2,
+                                   r: 0, g: 255, b: 0, multiColor: false)
+    let prepare = Panteon.buildCommand(sub: 1)
+    let write = Panteon.buildWriteBlock(sub: Panteon.subWriteBlock, addr: 0, data: green)
+    let apply = Panteon.buildCommand(sub: 2)
+
+    // Шлёт тройку команд разными способами на коллекцию c.
+    func seq(_ c: HIDCollection, feature: Bool, numbered: Bool) {
+        for cmd in [prepare, write, apply] {
+            if feature {
+                _ = sendFeatureReport(c, reportID: 0, bytes: cmd)
+            } else if numbered {
+                _ = sendNumbered(c, command: cmd)
+            } else {
+                _ = sendOutputReport(c, reportID: 0, bytes: cmd)
+            }
+            usleep(5_000)
+        }
+    }
+
+    var attempt = 1
+    for (i, c) in collections.enumerated() {
+        let seized = openDeviceSeized(c) == kIOReturnSuccess || openDevice(c) == kIOReturnSuccess
+        if !seized { print("коллекция [\(i)] не открылась"); continue }
+        // Вариант A: output, нумерованный (reportID=4 из байта команды).
+        print("Попытка \(attempt): коллекция[\(i)] usage=0x\(String(c.usage,radix:16)) output numbered"); attempt += 1
+        seq(c, feature: false, numbered: true); usleep(2_000_000)
+        // Вариант B: output, полный буфер reportID=0.
+        print("Попытка \(attempt): коллекция[\(i)] output reportID0"); attempt += 1
+        seq(c, feature: false, numbered: false); usleep(2_000_000)
+        // Вариант C: feature (если есть).
+        if c.maxFeatureReportSize >= 64 {
+            print("Попытка \(attempt): коллекция[\(i)] feature"); attempt += 1
+            seq(c, feature: true, numbered: false); usleep(2_000_000)
+        }
+        closeDevice(c)
+    }
+    print("Готово. На какой попытке подсветка стала зелёной или мелькнула?")
+    return 0
+}
+
+// Универсальная установка режима+цвета (канал output report ID 4, эксклюзивно).
+// Аргументы: <режим> <R> <G> <B> [яркость]. Последовательность prepare→write(addr0)→apply.
+func runSet(_ a: [String]) -> Int32 {
+    guard a.count >= 4, let mode = UInt8(a[0]), let r = UInt8(a[1]),
+          let g = UInt8(a[2]), let b = UInt8(a[3]) else {
+        FileHandle.standardError.write(Data("Использование: panteonctl set <режим> <R> <G> <B> [яркость 0-4]\n".utf8))
+        return 2
+    }
+    let brightness = a.count >= 5 ? (UInt8(a[4]) ?? 4) : 4
+    do {
+        let collections = try findPanteonCollections()
+        guard let cmd = commandCollection(collections) else {
+            FileHandle.standardError.write(Data("Канал команд не найден\n".utf8)); return 1
+        }
+        // Эксклюзивный доступ (требует sudo) — чтобы не было фантомных нажатий.
+        guard openDeviceSeized(cmd) == kIOReturnSuccess else {
+            FileHandle.standardError.write(Data("Не открыть устройство (нужен sudo для seize)\n".utf8)); return 1
+        }
+        defer { closeDevice(cmd) }
+
+        let prepare = Panteon.buildCommand(sub: 1)
+        let block = Panteon.lightBlock(mode: mode, brightness: brightness, speed: 2,
+                                       r: r, g: g, b: b, multiColor: false)
+        let write = Panteon.buildWriteBlock(sub: Panteon.subWriteBlock, addr: 0, data: block)
+        let apply = Panteon.buildCommand(sub: 2)
+
+        _ = sendNumbered(cmd, command: prepare)
+        _ = sendNumbered(cmd, command: write)
+        usleep(10_000)
+        _ = sendNumbered(cmd, command: apply)
+        print("Отправлено: режим=\(mode) R=\(r) G=\(g) B=\(b) яркость=\(brightness)")
+        print("Что сейчас на клавиатуре?")
+        return 0
+    } catch {
+        FileHandle.standardError.write(Data("Ошибка: \(error)\n".utf8)); return 1
+    }
+}
+
 // Диагностика: послать произвольный режим N с цветом, чтобы увидеть реакцию.
 // Аргументы: <режим N> [R G B] [яркость]. Помогает понять, что реально меняется.
 func runMode(_ a: [String]) -> Int32 {
@@ -188,6 +311,12 @@ case "static":
     exit(runStatic(Array(args.dropFirst(2))))
 case "mode":
     exit(runMode(Array(args.dropFirst(2))))
+case "set":
+    exit(runSet(Array(args.dropFirst(2))))
+case "sweep":
+    exit(runSweep())
+case "rd":
+    exit(runRead())
 default:
     print("panteonctl — утилита для клавиатуры PANTEON T20 PRO")
     print("Команды:")
