@@ -63,9 +63,29 @@ func openDevice(_ c: HIDCollection) -> IOReturn {
     return IOHIDDeviceOpen(c.device, IOOptionBits(kIOHIDOptionsTypeNone))
 }
 
+// Открывает устройство ЭКСКЛЮЗИВНО (seize): на время работы перехватывает ввод с
+// клавиатуры, чтобы наши output-отчёты не смешивались с обычными нажатиями
+// (иначе возникают фантомные «залипшие» клавиши). Закрытие возвращает ввод.
+func openDeviceSeized(_ c: HIDCollection) -> IOReturn {
+    return IOHIDDeviceOpen(c.device, IOOptionBits(kIOHIDOptionsTypeSeizeDevice))
+}
+
 // Закрывает устройство.
 func closeDevice(_ c: HIDCollection) {
     IOHIDDeviceClose(c.device, IOOptionBits(kIOHIDOptionsTypeNone))
+}
+
+// Отправляет feature-отчёт на устройство (альтернативный канал команд).
+func sendFeatureReport(_ c: HIDCollection, reportID: UInt8, bytes: [UInt8]) -> IOReturn {
+    return bytes.withUnsafeBufferPointer { ptr in
+        IOHIDDeviceSetReport(c.device, kIOHIDReportTypeFeature, CFIndex(reportID), ptr.baseAddress!, bytes.count)
+    }
+}
+
+// Выбирает коллекцию с feature-отчётом нужного размера (канал команд через feature).
+func featureCollection(_ cols: [HIDCollection]) -> HIDCollection? {
+    return cols.filter { $0.maxFeatureReportSize >= 64 }
+        .max { $0.maxFeatureReportSize < $1.maxFeatureReportSize }
 }
 
 // Отправляет output-отчёт на устройство. reportID — номер отчёта (0, если нумерации нет).
