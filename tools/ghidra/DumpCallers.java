@@ -13,7 +13,7 @@ import java.util.Set;
 
 public class DumpCallers extends GhidraScript {
     // Транспортные/служебные функции, найденные ранее (entry-адреса).
-    static final String[] SEEDS = { "00477500", "00477fe0" };
+    static final String[] SEEDS = { "004799c0", "0047a430", "00478fa0", "00479f20", "0047a1a0" };
 
     DecompInterface decomp;
     ConsoleTaskMonitor mon;
