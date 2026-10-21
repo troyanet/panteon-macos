@@ -116,6 +116,14 @@ func findCollections(usagePage: Int) -> [HIDCollection] {
     }
 }
 
+// Читает сырой HID report descriptor устройства (неразрушающе).
+func getReportDescriptor(_ c: HIDCollection) -> [UInt8] {
+    guard let data = IOHIDDeviceGetProperty(c.device, kIOHIDReportDescriptorKey as CFString) as? Data else {
+        return []
+    }
+    return [UInt8](data)
+}
+
 // Контейнер для ответа устройства (input-отчёт приходит в C-колбэк).
 final class InputCapture {
     var data: [UInt8] = []
@@ -160,6 +168,14 @@ func sendCommandAndRead(_ c: HIDCollection, packet: [UInt8], reportID: UInt8, ti
         CFRunLoopRunInMode(.defaultMode, 0.05, true)
     }
     return capture.got ? capture.data : nil
+}
+
+// Отправляет команду как нумерованный отчёт: report ID = первый байт команды,
+// payload = остальные байты (на macOS report ID передаётся отдельно от данных).
+func sendNumbered(_ c: HIDCollection, command: [UInt8]) -> IOReturn {
+    let reportID = command[0]
+    let payload = Array(command.dropFirst())
+    return sendOutputReport(c, reportID: reportID, bytes: payload)
 }
 
 // Выбирает коллекцию-канал команд: с максимальным output-отчётом (нужно 64 байта).
