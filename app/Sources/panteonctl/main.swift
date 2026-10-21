@@ -45,21 +45,48 @@ func runQuery() -> Int32 {
         let hex = pkt.prefix(8).map { String(format: "%02x", $0) }.joined(separator: " ")
         print("Отправляю query (первые 8 байт): \(hex) …  (len=\(pkt.count))")
 
-        // Первый байт пакета = opcode(4). Пробуем как номер отчёта и как ненумерованный (0).
-        for rid: UInt8 in [0, pkt[0]] {
-            let r = sendOutputReport(cmd, reportID: rid, bytes: pkt)
-            print("  SetReport(reportID=\(rid)) → \(ioReturnName(r))")
-            if r == kIOReturnSuccess {
-                print("✅ Команда принята устройством (канал связи работает).")
-                return 0
-            }
+        // Отправляем запрос и ждём ответ (input-отчёт), таймаут 0.8 c.
+        if let resp = sendCommandAndRead(cmd, packet: pkt, reportID: 0, timeout: 0.8) {
+            let rhex = resp.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
+            print("✅ Команда принята, получен ответ (\(resp.count) байт):")
+            print("  \(rhex)\(resp.count > 32 ? " …" : "")")
+            return 0
         }
-        FileHandle.standardError.write(Data("Не удалось отправить команду ни с одним reportID.\n".utf8))
-        return 1
+        // Ответа нет, но проверим хотя бы факт успешной отправки.
+        let r = sendOutputReport(cmd, reportID: 0, bytes: pkt)
+        print("Ответ не получен (таймаут). Отправка: \(ioReturnName(r))")
+        return r == kIOReturnSuccess ? 0 : 1
     } catch {
         FileHandle.standardError.write(Data("Ошибка: \(error)\n".utf8))
         return 1
     }
+}
+
+// Диагностика каналов ответа: ищет vendor-коллекцию 0xFF00 и пробует feature-чтение.
+func runProbe() -> Int32 {
+    // 1) Пытаемся найти служебную vendor-коллекцию 0xFF00 (на Windows через неё шли команды).
+    let vendor = findCollections(usagePage: PanteonID.vendorUsagePage)
+    print("Vendor-коллекции (0xFF00): \(vendor.count)")
+    for c in vendor {
+        print("  usage=0x\(String(c.usage, radix: 16)) input=\(c.maxInputReportSize) output=\(c.maxOutputReportSize) feature=\(c.maxFeatureReportSize)")
+    }
+
+    // 2) Пробуем feature-чтение на всех коллекциях (возможный канал ответа).
+    guard let all = try? findPanteonCollections() else { return 1 }
+    for (i, c) in all.enumerated() where c.maxFeatureReportSize > 1 {
+        guard openDevice(c) == kIOReturnSuccess else { continue }
+        defer { closeDevice(c) }
+        for rid: UInt8 in [0, 4] {
+            let (r, data) = getFeatureReport(c, reportID: rid, length: max(c.maxFeatureReportSize, 64))
+            if r == kIOReturnSuccess && data.contains(where: { $0 != 0 }) {
+                let hex = data.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
+                print("[\(i)] feature(reportID=\(rid)) → \(hex)")
+            } else {
+                print("[\(i)] feature(reportID=\(rid)) → \(ioReturnName(r))\(data.allSatisfy { $0 == 0 } ? " (нули)" : "")")
+            }
+        }
+    }
+    return 0
 }
 
 // Разбор аргументов: `info` (по умолчанию) или `query`.
@@ -71,6 +98,8 @@ case "info":
     exit(runInfo())
 case "query":
     exit(runQuery())
+case "probe":
+    exit(runProbe())
 default:
     print("panteonctl — утилита для клавиатуры PANTEON T20 PRO")
     print("Команды:")

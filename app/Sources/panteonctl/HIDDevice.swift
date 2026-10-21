@@ -81,6 +81,87 @@ func sendOutputReport(_ c: HIDCollection, reportID: UInt8, bytes: [UInt8]) -> IO
     }
 }
 
+// Пытается прочитать feature-отчёт с устройства (альтернативный канал ответа).
+func getFeatureReport(_ c: HIDCollection, reportID: UInt8, length: Int) -> (IOReturn, [UInt8]) {
+    var buf = [UInt8](repeating: 0, count: length)
+    var len = length
+    let r = buf.withUnsafeMutableBufferPointer { ptr -> IOReturn in
+        IOHIDDeviceGetReport(c.device, kIOHIDReportTypeFeature, CFIndex(reportID), ptr.baseAddress!, &len)
+    }
+    return (r, Array(buf.prefix(len)))
+}
+
+// Ищет коллекции по VID/PID и конкретной usage page (напр. vendor 0xFF00).
+func findCollections(usagePage: Int) -> [HIDCollection] {
+    let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    let matching: [String: Any] = [
+        kIOHIDVendorIDKey as String: PanteonID.vendorID,
+        kIOHIDProductIDKey as String: PanteonID.productID,
+        kIOHIDPrimaryUsagePageKey as String: usagePage,
+    ]
+    IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+    IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+    defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
+    guard let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else { return [] }
+    return set.map { device in
+        HIDCollection(
+            usagePage: intProp(device, kIOHIDPrimaryUsagePageKey as CFString),
+            usage: intProp(device, kIOHIDPrimaryUsageKey as CFString),
+            maxInputReportSize: intProp(device, kIOHIDMaxInputReportSizeKey as CFString),
+            maxOutputReportSize: intProp(device, kIOHIDMaxOutputReportSizeKey as CFString),
+            maxFeatureReportSize: intProp(device, kIOHIDMaxFeatureReportSizeKey as CFString),
+            product: strProp(device, kIOHIDProductKey as CFString),
+            device: device
+        )
+    }
+}
+
+// Контейнер для ответа устройства (input-отчёт приходит в C-колбэк).
+final class InputCapture {
+    var data: [UInt8] = []
+    var got = false
+}
+
+// Отправляет команду и ждёт input-ответ от устройства (неразрушающе для query/read).
+// Устройство кладёт ответ в input-отчёт; читаем его через колбэк + прокрутку RunLoop.
+func sendCommandAndRead(_ c: HIDCollection, packet: [UInt8], reportID: UInt8, timeout: TimeInterval) -> [UInt8]? {
+    let capacity = max(c.maxInputReportSize, 64)
+    let reportBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
+    defer { reportBuffer.deallocate() }
+
+    let capture = InputCapture()
+    let ctx = Unmanaged.passUnretained(capture).toOpaque()
+
+    // Колбэк вызывается при приходе input-отчёта; копируем байты в контейнер.
+    IOHIDDeviceRegisterInputReportCallback(
+        c.device, reportBuffer, capacity,
+        { context, _, _, _, _, report, reportLength in
+            guard let context = context else { return }
+            let cap = Unmanaged<InputCapture>.fromOpaque(context).takeUnretainedValue()
+            cap.data = Array(UnsafeBufferPointer(start: report, count: reportLength))
+            cap.got = true
+        },
+        ctx
+    )
+    IOHIDDeviceScheduleWithRunLoop(c.device, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+    defer {
+        IOHIDDeviceUnscheduleFromRunLoop(c.device, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        // Снимаем колбэк, чтобы буфер не использовался после выхода.
+        IOHIDDeviceRegisterInputReportCallback(c.device, reportBuffer, capacity, nil, nil)
+    }
+
+    // Отправляем команду.
+    let r = sendOutputReport(c, reportID: reportID, bytes: packet)
+    if r != kIOReturnSuccess { return nil }
+
+    // Крутим RunLoop до ответа или таймаута.
+    let deadline = Date().addingTimeInterval(timeout)
+    while !capture.got && Date() < deadline {
+        CFRunLoopRunInMode(.defaultMode, 0.05, true)
+    }
+    return capture.got ? capture.data : nil
+}
+
 // Выбирает коллекцию-канал команд: с максимальным output-отчётом (нужно 64 байта).
 func commandCollection(_ cols: [HIDCollection]) -> HIDCollection? {
     return cols.filter { $0.maxOutputReportSize >= Panteon.commandLength }
