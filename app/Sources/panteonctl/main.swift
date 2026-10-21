@@ -21,16 +21,60 @@ func runInfo() -> Int32 {
     }
 }
 
-// Разбор аргументов: пока только `info` (по умолчанию тоже `info`).
+// Отправляет НЕРАЗРУШАЮЩИЙ запрос (0xAA) и проверяет, что канал связи работает.
+// Эта команда у родного ПО используется для опроса и ничего не меняет.
+func runQuery() -> Int32 {
+    do {
+        let collections = try findPanteonCollections()
+        guard let cmd = commandCollection(collections) else {
+            FileHandle.standardError.write(Data("Нет коллекции с output>=64 (канал команд не найден)\n".utf8))
+            return 1
+        }
+        print("Канал команд: usagePage=0x\(String(cmd.usagePage, radix: 16)) output=\(cmd.maxOutputReportSize)")
+
+        // Открываем устройство для отправки.
+        let opened = openDevice(cmd)
+        guard opened == kIOReturnSuccess else {
+            FileHandle.standardError.write(Data("Не удалось открыть устройство: \(ioReturnName(opened))\n".utf8))
+            return 1
+        }
+        defer { closeDevice(cmd) }
+
+        // Собираем безопасный пакет-запрос и печатаем его для наглядности.
+        let pkt = Panteon.queryCommand()
+        let hex = pkt.prefix(8).map { String(format: "%02x", $0) }.joined(separator: " ")
+        print("Отправляю query (первые 8 байт): \(hex) …  (len=\(pkt.count))")
+
+        // Первый байт пакета = opcode(4). Пробуем как номер отчёта и как ненумерованный (0).
+        for rid: UInt8 in [0, pkt[0]] {
+            let r = sendOutputReport(cmd, reportID: rid, bytes: pkt)
+            print("  SetReport(reportID=\(rid)) → \(ioReturnName(r))")
+            if r == kIOReturnSuccess {
+                print("✅ Команда принята устройством (канал связи работает).")
+                return 0
+            }
+        }
+        FileHandle.standardError.write(Data("Не удалось отправить команду ни с одним reportID.\n".utf8))
+        return 1
+    } catch {
+        FileHandle.standardError.write(Data("Ошибка: \(error)\n".utf8))
+        return 1
+    }
+}
+
+// Разбор аргументов: `info` (по умолчанию) или `query`.
 let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : "info"
 
 switch command {
 case "info":
     exit(runInfo())
+case "query":
+    exit(runQuery())
 default:
     print("panteonctl — утилита для клавиатуры PANTEON T20 PRO")
     print("Команды:")
-    print("  info   показать HID-коллекции устройства (только чтение)")
+    print("  info    показать HID-коллекции устройства (только чтение)")
+    print("  query   отправить безопасный запрос 0xAA (проверка связи, ничего не меняет)")
     exit(2)
 }

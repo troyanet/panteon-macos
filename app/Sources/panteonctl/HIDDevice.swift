@@ -45,6 +45,48 @@ private func strProp(_ device: IOHIDDevice, _ key: CFString) -> String {
     return value
 }
 
+// Человекочитаемое имя кода возврата IOKit (для диагностики).
+func ioReturnName(_ r: IOReturn) -> String {
+    switch r {
+    case kIOReturnSuccess: return "success"
+    case kIOReturnNotPermitted: return "not permitted (нужно разрешение Input Monitoring?)"
+    case kIOReturnNotPrivileged: return "not privileged (нужны права)"
+    case kIOReturnNotOpen: return "device not open"
+    case kIOReturnUnsupported: return "unsupported (неверный reportID/тип?)"
+    case kIOReturnExclusiveAccess: return "exclusive access (занято другим процессом)"
+    default: return "0x" + String(format: "%08x", UInt32(bitPattern: r))
+    }
+}
+
+// Открывает устройство для отправки отчётов. Без захвата ввода (seize=false).
+func openDevice(_ c: HIDCollection) -> IOReturn {
+    return IOHIDDeviceOpen(c.device, IOOptionBits(kIOHIDOptionsTypeNone))
+}
+
+// Закрывает устройство.
+func closeDevice(_ c: HIDCollection) {
+    IOHIDDeviceClose(c.device, IOOptionBits(kIOHIDOptionsTypeNone))
+}
+
+// Отправляет output-отчёт на устройство. reportID — номер отчёта (0, если нумерации нет).
+func sendOutputReport(_ c: HIDCollection, reportID: UInt8, bytes: [UInt8]) -> IOReturn {
+    return bytes.withUnsafeBufferPointer { ptr in
+        IOHIDDeviceSetReport(
+            c.device,
+            kIOHIDReportTypeOutput,
+            CFIndex(reportID),
+            ptr.baseAddress!,
+            bytes.count
+        )
+    }
+}
+
+// Выбирает коллекцию-канал команд: с максимальным output-отчётом (нужно 64 байта).
+func commandCollection(_ cols: [HIDCollection]) -> HIDCollection? {
+    return cols.filter { $0.maxOutputReportSize >= Panteon.commandLength }
+        .max { $0.maxOutputReportSize < $1.maxOutputReportSize }
+}
+
 // Находит все HID-коллекции нашей клавиатуры по VID/PID.
 func findPanteonCollections() throws -> [HIDCollection] {
     // Менеджер HID без опций — мы только перечисляем, не захватываем устройство.
