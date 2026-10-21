@@ -1,0 +1,17 @@
+# Чужой проприетарный софт и его дословные декомпиляции — не публикуем
+downloads/
+docs/decomp-*.txt
+
+# macOS / сборка
+.DS_Store
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+.swiftpm/
+
+# SwiftPM build
+app/.build/
+
+# Личные рабочие файлы — только локально
+CLAUDE.md
+JOURNAL.md
