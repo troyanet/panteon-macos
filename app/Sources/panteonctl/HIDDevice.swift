@@ -10,7 +10,9 @@ enum PanteonID {
     static let vendorID: Int = 0x320F
     static let productID: Int = 0x5080
     // Служебный канал подсветки/команд — vendor-specific usage page.
-    static let vendorUsagePage: Int = 0xFF00
+    // Из report descriptor: 0xFF1C (usage 0x92), report ID 4. Раньше ошибочно искал 0xFF00.
+    static let vendorUsagePage: Int = 0xFF1C
+    static let vendorUsage: Int = 0x92
 }
 
 // Описание одной HID-коллекции устройства (их у клавиатуры несколько).
